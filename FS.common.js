@@ -45,70 +45,179 @@ var getJobId = () => {
   return jobId;
 };
 
+var processDirPath = function(path) {
+  // Takes to be used in conjunction with NS<TYPE>Directory.
+  // Appends /siphon-data-<app_id>/<Type>/ to the path. This makes
+  // react-native-fs Sandbox-friendly
+  var a = __SIPHON.appID;
+  if (a == undefined || a == null || a.length < 1) {
+    throw 'Global appID must be set.';
+  }
+
+  var ext = 'siphon-data-' + a;
+  var lastChar = path.slice(-1);
+  if (lastChar !== '/') {
+    ext = '/' + ext;
+  }
+
+  return path + ext;
+};
+
+var normalizePath = function(path) {
+  var schemeless;
+  var scheme;
+  if (path.indexOf('://') > -1) {
+    var split = path.split('://');
+    scheme = split[0];
+    schemeless = split[1];
+  } else {
+    scheme = null;
+    schemeless = path;
+  }
+
+  var parts = schemeless.split('/');
+  var normParts = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (p == '.') {
+      continue;
+    } else if (p == '..') {
+      normParts.pop();
+    } else {
+      normParts.push(p);
+    }
+  }
+
+  var normalized;
+  if (scheme) {
+    normalized = scheme + '://' + normParts.join('/');
+  } else {
+    normalized = normParts.join('/');
+  }
+
+  return normalized;
+};
+
+var rootDir = function(path) {
+  // Return the processed root if it is valid
+  path = normalizePath(path);
+  var root = null;
+  var validDirs = [
+    processDirPath(RNFSManager.NSCachesDirectoryPath),
+    processDirPath(RNFSManager.NSDocumentDirectoryPath),
+    processDirPath(RNFSManager.NSLibraryDirectoryPath),
+  ];
+  for (var i = 0; i < validDirs.length; i++) {
+    var d = validDirs[i];
+    if (path.substring(0, d.length) == d) {
+      root = path.substring(0, d.length);
+      break;
+    }
+  }
+
+  return root;
+};
+
 var RNFS = {
 
+  _ensureValidRoot(path) {
+    // We want the app's subdirectories to behave like their regular
+    // analogues, so we ensure they exist when they are referenced.
+    return new Promise(function(resolve, reject) {
+      var root = rootDir(path);
+
+      if (!root) {
+        reject(new Error('Warning: Invalid directory for Siphon app.'));
+      }
+
+      var excludeFromBackup = false;
+      if (root == processDirPath(RNFSManager.NSCachesDirectoryPath)) {
+        excludeFromBackup = true;
+      }
+
+      return _mkdir(root, excludeFromBackup)
+        .then(() => resolve())
+        .catch((err) => reject(err));
+    });
+  },
+
   readDir(dirpath) {
-    return _readDir(dirpath)
-      .then(files => {
-        return files.map(file => ({
-          name: file.name,
-          path: file.path,
-          size: file.size,
-          isFile: () => file.type === NSFileTypeRegular,
-          isDirectory: () => file.type === NSFileTypeDirectory,
-        }));
+    return RNFS._ensureValidRoot(dirpath)
+      .then(() => {
+        return _readDir(dirpath)
+          .then(files => {
+            return files.map(file => ({
+              name: file.name,
+              path: file.path,
+              size: file.size,
+              isFile: () => file.type === NSFileTypeRegular,
+              isDirectory: () => file.type === NSFileTypeDirectory,
+            }));
+          })
+          .catch(convertError);
       })
       .catch(convertError);
   },
 
   // Node style version (lowercase d). Returns just the names
   readdir(dirpath) {
-    return RNFS.readDir(dirpath)
-      .then(files => {
-        return files.map(file => file.name);
+    return RNFS._ensureValidRoot(dirpath)
+      .then(() => {
+        return RNFS.readDir(dirpath)
+          .then(files => {
+            return files.map(file => file.name);
+          });
       });
   },
 
   stat(filepath) {
-    return _stat(filepath)
-      .then((result) => {
-        return {
-          'ctime': new Date(result.ctime*1000),
-          'mtime': new Date(result.mtime*1000),
-          'size': result.size,
-          'mode': result.mode,
-          isFile: () => result.type === NSFileTypeRegular,
-          isDirectory: () => result.type === NSFileTypeDirectory,
-        };
-      })
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _stat(filepath)
+          .then((result) => {
+            return {
+              'ctime': new Date(result.ctime*1000),
+              'mtime': new Date(result.mtime*1000),
+              'size': result.size,
+              'mode': result.mode,
+              isFile: () => result.type === NSFileTypeRegular,
+              isDirectory: () => result.type === NSFileTypeDirectory,
+            };
+          })
+          .catch(convertError);
+      });
   },
-  
+
   exists(filepath) {
-    return _exists(filepath)
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _exists(filepath)
+          .catch(convertError);
+      });
   },
 
   readFile(filepath, encoding) {
     if (!encoding) encoding = 'utf8';
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _readFile(filepath)
+          .then((b64) => {
+            var contents;
 
-    return _readFile(filepath)
-      .then((b64) => {
-        var contents;
+            if (encoding === 'utf8') {
+              contents = utf8.decode(base64.decode(b64));
+            } else if (encoding === 'ascii') {
+              contents = base64.decode(b64);
+            } else if (encoding === 'base64') {
+              contents = b64;
+            } else {
+              throw new Error('Invalid encoding type "' + encoding + '"');
+            }
 
-        if (encoding === 'utf8') {
-          contents = utf8.decode(base64.decode(b64));
-        } else if (encoding === 'ascii') {
-          contents = base64.decode(b64);
-        } else if (encoding === 'base64') {
-          contents = b64;
-        } else {
-          throw new Error('Invalid encoding type "' + encoding + '"');
-        }
-
-        return contents;
-      })
-      .catch(convertError);
+            return contents;
+          })
+          .catch(convertError);
+      });
   },
 
   writeFile(filepath, contents, encoding, options) {
@@ -126,28 +235,40 @@ var RNFS = {
       throw new Error('Invalid encoding type "' + encoding + '"');
     }
 
-    return _writeFile(filepath, b64, options)
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _writeFile(filepath, b64, options)
+          .catch(convertError);
+      });
   },
 
   moveFile(filepath, destPath) {
-    return _moveFile(filepath, destPath)
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _moveFile(filepath, destPath)
+          .catch(convertError);
+      });
   },
 
   pathForBundle(bundleName) {
-    return _pathForBundle(bundleName);
+    console.log('Warning: pathForBundle is disabled by Siphon.');
   },
 
   unlink(filepath) {
-    return _unlink(filepath)
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        return _unlink(filepath)
+          .catch(convertError);
+      });
   },
 
   mkdir(filepath, excludeFromBackup) {
-    excludeFromBackup = !!excludeFromBackup;
-    return _mkdir(filepath, excludeFromBackup)
-      .catch(convertError);
+    return RNFS._ensureValidRoot(filepath)
+      .then(() => {
+        excludeFromBackup = !!excludeFromBackup;
+        return _mkdir(filepath, excludeFromBackup)
+          .catch(convertError);
+      });
   },
 
   downloadFile(fromUrl, toFile, begin, progress) {
@@ -173,24 +294,25 @@ var RNFS = {
         subscriptionAndroid = DeviceEventEmitter.addListener('DownloadProgress-' + jobId, progress);
     }
 
-    return _downloadFile(fromUrl, toFile, jobId)
-      .then(res => {
-        if (subscriptionIos) subscriptionIos.remove();
-        if (subscriptionAndroid) subscriptionAndroid.remove();
-        return res;
-      })
-      .catch(convertError);
+    return RNFS._ensureValidRoot(toFile)
+      .then(() => {
+        return _downloadFile(fromUrl, toFile, jobId)
+          .then(res => {
+            if (subscriptionIos) subscriptionIos.remove();
+            if (subscriptionAndroid) subscriptionAndroid.remove();
+            return res;
+          })
+          .catch(convertError);
+      });
   },
 
   stopDownload(jobId) {
     RNFSManager.stopDownload(jobId);
   },
 
-  MainBundlePath: RNFSManager.MainBundlePath,
-  CachesDirectoryPath: RNFSManager.NSCachesDirectoryPath,
-  DocumentDirectoryPath: RNFSManager.NSDocumentDirectoryPath,
-  LibraryDirectoryPath: RNFSManager.NSLibraryDirectoryPath,
-  PicturesDirectoryPath: RNFSManager.NSPicturesDirectoryPath
+  CachesDirectoryPath: processDirPath(RNFSManager.NSCachesDirectoryPath),
+  DocumentDirectoryPath: processDirPath(RNFSManager.NSDocumentDirectoryPath),
+  LibraryDirectoryPath: processDirPath(RNFSManager.NSLibraryDirectoryPath),
 };
 
 module.exports = RNFS;

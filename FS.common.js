@@ -10,6 +10,7 @@ if (typeof self === 'undefined') {
 var RNFSManager = require('react-native').NativeModules.RNFSManager;
 var NativeAppEventEmitter = require('react-native').NativeAppEventEmitter;  // iOS
 var DeviceEventEmitter = require('react-native').DeviceEventEmitter;        // Android
+var Platform  = require('react-native').Platform;
 var Promise = require('bluebird');
 var base64 = require('base-64');
 var utf8 = require('utf8');
@@ -49,9 +50,13 @@ var processDirPath = function(path) {
   // Takes to be used in conjunction with NS<TYPE>Directory.
   // Appends /siphon-data-<app_id>/<Type>/ to the path. This makes
   // react-native-fs Sandbox-friendly
+  if (typeof path !== 'string') {
+    throw new Error('Path must be a string. Provided was ' + typeof path);
+  }
+
   var a = __SIPHON.appID;
   if (a == undefined || a == null || a.length < 1) {
-    throw 'Global appID must be set.';
+    throw new Error('Global appID must be set.');
   }
 
   var ext = 'siphon-data-' + a;
@@ -64,6 +69,10 @@ var processDirPath = function(path) {
 };
 
 var normalizePath = function(path) {
+  if (typeof path !== 'string') {
+    throw new Error('Path must be a string. Provided was ' + typeof path);
+  }
+
   var schemeless;
   var scheme;
   if (path.indexOf('://') > -1) {
@@ -102,11 +111,17 @@ var rootDir = function(path) {
   // Return the processed root if it is valid
   path = normalizePath(path);
   var root = null;
+  // Universal
   var validDirs = [
     processDirPath(RNFSManager.NSCachesDirectoryPath),
     processDirPath(RNFSManager.NSDocumentDirectoryPath),
-    processDirPath(RNFSManager.NSLibraryDirectoryPath),
   ];
+
+  // iOS only
+  if (Platform.OS == 'ios') {
+    validDirs.push(processDirPath(RNFSManager.NSLibraryDirectoryPath));
+  }
+
   for (var i = 0; i < validDirs.length; i++) {
     var d = validDirs[i];
     if (path.substring(0, d.length) == d) {
@@ -127,7 +142,9 @@ var RNFS = {
       var root = rootDir(path);
 
       if (!root) {
-        reject(new Error('Warning: Invalid directory for Siphon app.'));
+        reject(new Error('Warning: Invalid directory for Siphon app. ' +
+              'Please use one of DocumentDirectoryPath, ' +
+              'CachesDirectoryPath or LibraryDirectoryPath (iOS only).'));
       }
 
       var excludeFromBackup = false;
@@ -312,7 +329,10 @@ var RNFS = {
 
   CachesDirectoryPath: processDirPath(RNFSManager.NSCachesDirectoryPath),
   DocumentDirectoryPath: processDirPath(RNFSManager.NSDocumentDirectoryPath),
-  LibraryDirectoryPath: processDirPath(RNFSManager.NSLibraryDirectoryPath),
 };
+
+if (Platform.OS == 'ios') {
+  RNFS.LibraryDirectoryPath = processDirPath(RNFSManager.NSLibraryDirectoryPath);
+}
 
 module.exports = RNFS;
